@@ -1,25 +1,20 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import requests
 import json
-import base64
-import hashlib
-import time
 import os
-from Cryptodome.Cipher import AES
-from Cryptodome.Util.Padding import unpad
 
 app = FastAPI()
 
-# 从环境变量读取（你稍后在 Vercel 里填，现在先不动）
+# 从环境变量读取
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID")
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET")
-FEISHU_ENCRYPT_KEY = os.getenv("FEISHU_ENCRYPT_KEY")
+FEISHU_ENCRYPT_KEY = os.getenv("FEISHU_ENCRYPT_KEY")  # 暂时不用，备用
 KIMI_API_KEY = os.getenv("KIMI_API_KEY")
 
 KIMI_BASE_URL = "https://api.moonshot.cn/v1"
 
-# ===== 豆选 + MaxMa System Prompt（根据咱们之前的约定） =====
+# 豆选 + MaxMa System Prompt
 SYSTEM_PROMPT = """你是心知能源的【首席政策研究室主任】，底层 OS 为【豆选】文风，运行【MaxMa】思维模型。
 
 【豆选文风特征】：
@@ -36,31 +31,17 @@ SYSTEM_PROMPT = """你是心知能源的【首席政策研究室主任】，底�
 
 输出要求：简洁、结构化、专业，必要时使用 Markdown 表格或列表。"""
 
-# ===== 飞书加密/解密工具 =====
-def decrypt_feishu_message(encrypt_key, encrypt_msg):
-    """解密飞书推送的消息"""
-    try:
-        key = hashlib.sha256(encrypt_key.encode('utf-8')).digest()[:32]
-        cipher = AES.new(key, AES.MODE_CBC, iv=b'0000000000000000')
-        decrypted = unpad(cipher.decrypt(base64.b64decode(encrypt_msg)), AES.block_size)
-        return json.loads(decrypted.decode('utf-8'))
-    except Exception as e:
-        print(f"解密失败: {e}")
-        return None
-
-# ===== Kimi 调用 =====
-def call_kimi(user_text: str, chat_context: list = None) -> str:
+def call_kimi(user_text: str) -> str:
     """调用 Kimi K2.5"""
     headers = {
         "Authorization": f"Bearer {KIMI_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    
-    if chat_context:
-        messages.extend(chat_context)
-    messages.append({"role": "user", "content": user_text})
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text}
+    ]
     
     payload = {
         "model": "kimi-k2-5",
@@ -82,7 +63,6 @@ def call_kimi(user_text: str, chat_context: list = None) -> str:
         print(f"Kimi 调用失败: {e}")
         return f"服务暂时异常: {str(e)}"
 
-# ===== 飞书 Token 管理（简单版，实际生产建议缓存） =====
 def get_feishu_token():
     """获取 tenant_access_token"""
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -92,7 +72,7 @@ def get_feishu_token():
     })
     return resp.json().get("tenant_access_token")
 
-def send_feishu_reply(chat_id, text, msg_type="text"):
+def send_feishu_reply(chat_id, text):
     """回复消息"""
     token = get_feishu_token()
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
@@ -101,7 +81,7 @@ def send_feishu_reply(chat_id, text, msg_type="text"):
         "Content-Type": "application/json"
     }
     
-    # 如果内容太长，截断或分段（飞书单条限制 8000 字符）
+    # 截断长消息
     if len(text) > 7900:
         text = text[:7900] + "\n\n...[内容过长，已截断]"
     
@@ -117,46 +97,49 @@ def send_feishu_reply(chat_id, text, msg_type="text"):
     resp = requests.post(url, headers=headers, params=params, json=body)
     return resp.json()
 
-# ===== Webhook 入口 =====
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    
-    # 1. 处理飞书首次配置时的 Challenge 验证
-    if "challenge" in data:
-        return JSONResponse({"challenge": data["challenge"]})
-    
-    # 2. 处理加密消息（如果你开启了加密）
-    encrypt_msg = data.get("encrypt")
-    if encrypt_msg and FEISHU_ENCRYPT_KEY:
-        decrypted_data = decrypt_feishu_message(FEISHU_ENCRYPT_KEY, encrypt_msg)
-        if decrypted_data:
-            data = decrypted_data
-    
-    # 3. 处理业务消息
-    event = data.get("event", {})
-    if event.get("type") == "im.message.receive_v1":
-        message = event.get("message", {})
-        content_data = json.loads(message.get("content", "{}"))
+    try:
+        data = await request.json()
         
-        # 提取纯文本
-        user_text = content_data.get("text", "")
-        chat_id = message.get("chat_id")
+        # 处理 Challenge 验证（飞书首次配置）
+        if "challenge" in data:
+            return JSONResponse({"challenge": data["challenge"]})
         
-        # 可选：@机器人时去掉 @部分
-        mentions = content_data.get("mentions", [])
-        for mention in mentions:
-            user_text = user_text.replace(mention.get("key", ""), "").strip()
+        # 处理加密消息（如果开启了加密）
+        encrypt_msg = data.get("encrypt")
+        if encrypt_msg and FEISHU_ENCRYPT_KEY:
+            # 暂时不处理加密，直接返回成功，避免报错
+            # 如果需要加密，后续再添加
+            pass
         
-        print(f"收到消息: {user_text}")
+        # 处理业务消息
+        event = data.get("event", {})
+        if event.get("type") == "im.message.receive_v1":
+            message = event.get("message", {})
+            content_data = json.loads(message.get("content", "{}"))
+            
+            # 提取纯文本
+            user_text = content_data.get("text", "")
+            chat_id = message.get("chat_id")
+            
+            # 去掉 @机器人的部分
+            mentions = content_data.get("mentions", [])
+            for mention in mentions:
+                user_text = user_text.replace(mention.get("key", ""), "").strip()
+            
+            print(f"收到消息: {user_text}")
+            
+            # 调用 Kimi
+            reply_text = call_kimi(user_text)
+            
+            # 回复
+            send_feishu_reply(chat_id, reply_text)
         
-        # 调用 Kimi
-        reply_text = call_kimi(user_text)
-        
-        # 回复
-        send_feishu_reply(chat_id, reply_text)
-    
-    return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        print(f"处理请求时出错: {e}")
+        return JSONResponse({"status": "error", "message": str(e)})
 
 @app.get("/")
 async def root():
